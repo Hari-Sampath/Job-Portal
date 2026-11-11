@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JobPortal</title>
+<style>
+  :root { --dark:#0b2545; --blue:#1d6fd8; --light:#eaf2fc; --line:#d5e2f3; --text:#14213d; --muted:#5b6b85; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:system-ui,"Segoe UI",Arial,sans-serif; background:var(--light); color:var(--text); }
+  .bar { background:var(--dark); color:#fff; display:flex; justify-content:space-between; align-items:center; padding:14px 5%; }
+  .brand { font-weight:700; font-size:20px; cursor:pointer; }
+  .links a { margin-left:22px; cursor:pointer; color:#cfe0f7; }
+  .links a:hover { color:#fff; }
+  .wrap { max-width:960px; margin:24px auto; padding:0 16px; }
+  .hero { background:linear-gradient(135deg,var(--dark),var(--blue)); color:#fff; padding:34px; border-radius:8px; margin-bottom:16px; }
+  .hero h1 { margin:0 0 6px; }
+  .hero p { margin:0; color:#dbe8fb; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:8px; padding:18px; margin-bottom:14px; }
+  .card h3 { margin:0 0 4px; color:var(--dark); }
+  input, select, textarea { width:100%; padding:10px; border:1px solid var(--line); border-radius:6px; font:inherit; background:#fff; }
+  textarea { min-height:80px; resize:vertical; }
+  button { background:var(--blue); color:#fff; border:0; padding:10px 18px; border-radius:6px; cursor:pointer; font:inherit; }
+  button:hover { background:var(--dark); }
+  button:disabled { opacity:.4; cursor:default; }
+  button.alt { background:#fff; color:var(--blue); border:1px solid var(--blue); }
+  button.alt:hover { background:var(--light); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; margin-bottom:12px; }
+  .row { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+  .right { text-align:right; white-space:nowrap; }
+  .chip { display:inline-block; background:var(--light); color:var(--dark); padding:3px 10px; border-radius:12px; font-size:13px; margin:0 6px 6px 0; }
+  .muted { color:var(--muted); font-size:14px; }
+  .tabs { display:flex; gap:4px; margin-bottom:16px; border-bottom:2px solid var(--line); }
+  .tabs a { padding:10px 16px; cursor:pointer; color:var(--dark); }
+  .tabs a.on { background:var(--blue); color:#fff; border-radius:6px 6px 0 0; }
+  .badge { padding:4px 12px; border-radius:12px; font-size:13px; background:var(--light); color:var(--dark); text-transform:capitalize; }
+  .badge.hired, .badge.shortlisted, .badge.open { background:#d9f2e3; color:#14633a; }
+  .badge.rejected, .badge.closed { background:#fde2e2; color:#8a1f1f; }
+  .match { background:var(--dark); color:#fff; display:inline-block; padding:4px 12px; border-radius:6px; font-size:14px; margin-right:8px; }
+  .auth { max-width:420px; margin:0 auto; }
+  .auth input { margin-bottom:10px; }
+  .pager { display:flex; justify-content:center; align-items:center; gap:14px; margin:8px 0 20px; }
+  .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  #toast { position:fixed; bottom:20px; right:20px; background:var(--dark); color:#fff; padding:12px 18px; border-radius:6px; display:none; max-width:340px; }
+  #toast.bad { background:#b3261e; }
+</style>
+</head>
+<body>
+<div id="nav"></div>
+<div class="wrap" id="app"></div>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const STATUSES = ['applied', 'reviewing', 'shortlisted', 'interview', 'rejected', 'hired'];
+let token = localStorage.token, role = localStorage.role;
+let view = 'jobs', tab = '', authRole = 'candidate', authMode = 'login';
+
+// ---------- helpers ----------
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const money = (n) => '₹' + Number(n).toLocaleString('en-IN');
+const chips = (list) => (list || []).map((s) => `<span class="chip">${esc(s)}</span>`).join('');
+const note = (t) => `<div class="card muted">${t}</div>`;
+
+function toast(text, bad) {
+  const t = $('toast');
+  t.textContent = text;
+  t.className = bad ? 'bad' : '';
+  t.style.display = 'block';
+  setTimeout(() => (t.style.display = 'none'), 3500);
+}
+
+// calls the backend; throws an Error with the server's message if something fails
+async function api(method, path, body, isForm) {
+  const headers = {};
+  if (token) headers.Authorization = 'Bearer ' + token;
+  if (body && !isForm) headers['Content-Type'] = 'application/json';
+  const res = await fetch('/api' + path, { method, headers, body: isForm ? body : body && JSON.stringify(body) });
+  const data = res.status === 204 ? null : await res.json().catch(() => null);
+  if (!res.ok) {
+    if (res.status === 401 && token) logout();
+    throw new Error(data?.details ? data.details.map((d) => d.field + ': ' + d.message).join(', ') : data?.error || 'Request failed');
+  }
+  return data;
+}
+
+// runs a function and shows any error as a message
+async function act(fn) {
+  try { await fn(); } catch (e) { toast(e.message, true); }
+}
+
+function show(v, t) { view = v; tab = t || ''; render(); }
+function logout() { token = role = undefined; localStorage.clear(); show('jobs'); }
+
+function nav() {
+  $('nav').innerHTML = `<div class="bar"><div class="brand" onclick="show('jobs')">JobPortal</div><div class="links">
+    <a onclick="show('jobs')">Jobs</a>` +
+    (token ? `<a onclick="show('${role}')">My dashboard</a><a onclick="logout()">Logout</a>` : `<a onclick="show('login')">Login / Register</a>`) +
+    `</div></div>`;
+}
+
+function tabBar(list) {
+  return `<div class="tabs">${list.map(([k, l]) => `<a class="${tab === k ? 'on' : ''}" onclick="show(view,'${k}')">${l}</a>`).join('')}</div>`;
+}
+
+function pager(r, fn) {
+  if (r.totalPages < 2) return '';
+  return `<div class="pager"><button class="alt" ${r.page <= 1 ? 'disabled' : ''} onclick="act(()=>${fn}(${r.page - 1}))">Previous</button>
+    <span class="muted">Page ${r.page} of ${r.totalPages}</span>
+    <button class="alt" ${r.page >= r.totalPages ? 'disabled' : ''} onclick="act(()=>${fn}(${r.page + 1}))">Next</button></div>`;
+}
+
+function render() {
+  nav();
+  const pages = { jobs: jobsView, login: loginView, candidate: candView, employer: empView };
+  act(pages[view]);
+}
+
+// ---------- cards ----------
+function applyBtn(id) {
+  if (role === 'candidate') return `<div class="actions"><button onclick="act(()=>apply('${id}'))">Apply</button></div>`;
+  if (!token) return `<div class="actions"><button class="alt" onclick="show('login')">Login to apply</button></div>`;
+  return '';
+}
+
+function jobCard(j, extra) {
+  return `<div class="card"><div class="row"><div><h3>${esc(j.title)}</h3>
+    <div class="muted">${esc(j.companyName)} · ${esc(j.location)}${j.remote ? ' · Remote' : ''} · ${esc(j.jobType)}</div></div>
+    <div class="right"><b>${money(j.salaryMin)} - ${money(j.salaryMax)}</b><div class="muted">${j.minExperience}+ years</div></div></div>
+    <p>${esc(j.description.slice(0, 170))}</p>${chips(j.skills)}${extra ?? applyBtn(j.id)}</div>`;
+}
+
+function candCard(c, extra) {
+  const p = c.profile;
+  return `<div class="card"><h3>${esc(p.fullName)}</h3>
+    <div class="muted">${esc(p.headline || '')} ${p.location ? '· ' + esc(p.location) : ''} · ${p.experienceYears} years · ${esc(c.email)}</div>
+    <div style="margin:10px 0 4px">${chips(p.skills)}</div>${extra || ''}</div>`;
+}
+
+// ---------- public: jobs ----------
+function jobsView() {
+  $('app').innerHTML = `<div class="hero"><h1>Find your next job</h1><p>Search by keyword, skills, location and salary</p></div>
+    <div class="card"><div class="grid">
+      <input id="f-q" placeholder="Title, company or keyword">
+      <input id="f-location" placeholder="Location">
+      <input id="f-skills" placeholder="Skills (node.js, react)">
+      <input id="f-minSalary" type="number" placeholder="Minimum yearly salary">
+      <input id="f-experience" type="number" placeholder="Your experience (years)">
+      <select id="f-jobType"><option value="">Any job type</option><option>full-time</option><option>part-time</option><option>contract</option><option>internship</option></select>
+      <select id="f-remote"><option value="">Remote or on-site</option><option value="true">Remote only</option><option value="false">On-site only</option></select>
+    </div><button onclick="act(()=>searchJobs(1))">Search jobs</button></div><div id="results"></div>`;
+  return searchJobs(1);
+}
+
+async function searchJobs(page) {
+  const p = new URLSearchParams({ page, limit: 6 });
+  for (const k of ['q', 'location', 'skills', 'minSalary', 'experience', 'jobType', 'remote']) {
+    if ($('f-' + k).value) p.set(k, $('f-' + k).value);
+  }
+  const r = await api('GET', '/jobs?' + p);
+  $('results').innerHTML = (r.items.map((j) => jobCard(j)).join('') || note('No jobs found.')) + pager(r, 'searchJobs');
+}
+
+async function apply(id) {
+  const letter = prompt('Cover letter (optional)');
+  if (letter === null) return;
+  await api('POST', `/jobs/${id}/apply`, { coverLetter: letter || undefined });
+  toast('Application sent. Check "My applications" to track it.');
+}
+
+// ---------- login / register ----------
+function loginView() {
+  const reg = authMode === 'register', emp = authRole === 'employer';
+  const fields = emp
+    ? `<input id="a-companyName" placeholder="Company name"><input id="a-industry" placeholder="Industry (optional)"><input id="a-location" placeholder="Location (optional)">`
+    : `<input id="a-fullName" placeholder="Full name"><input id="a-location" placeholder="Location (optional)">
+       <input id="a-skills" placeholder="Skills, comma separated"><input id="a-experienceYears" type="number" placeholder="Years of experience">
+       <input id="a-expectedSalary" type="number" placeholder="Expected yearly salary (optional)">`;
+  $('app').innerHTML = `<div class="card auth">
+    <div class="tabs"><a class="${!emp ? 'on' : ''}" onclick="authRole='candidate';render()">Candidate</a><a class="${emp ? 'on' : ''}" onclick="authRole='employer';render()">Employer</a></div>
+    <div class="tabs"><a class="${!reg ? 'on' : ''}" onclick="authMode='login';render()">Login</a><a class="${reg ? 'on' : ''}" onclick="authMode='register';render()">Register</a></div>
+    <input id="a-email" placeholder="Email"><input id="a-password" type="password" placeholder="Password (min 6 characters)">
+    ${reg ? fields : ''}<button style="width:100%" onclick="act(submitAuth)">${reg ? 'Create account' : 'Login'}</button></div>`;
+}
+
+async function submitAuth() {
+  const body = { email: $('a-email').value, password: $('a-password').value };
+  if (authMode === 'register') {
+    const keys = authRole === 'employer' ? ['companyName', 'industry', 'location'] : ['fullName', 'location', 'skills', 'experienceYears', 'expectedSalary'];
+    for (const k of keys) {
+      const v = $('a-' + k).value.trim();
+      if (!v) continue;
+      body[k] = k === 'skills' ? v.split(',') : ['experienceYears', 'expectedSalary'].includes(k) ? Number(v) : v;
+    }
+  }
+  const r = await api('POST', `/${authRole}s/${authMode}`, body);
+  token = localStorage.token = r.token;
+  role = localStorage.role = authRole;
+  show(role);
+}
+
+// ---------- candidate dashboard ----------
+async function candView() {
+  tab = tab || 'recs';
+  $('app').innerHTML = tabBar([['recs', 'Recommended jobs'], ['apps', 'My applications'], ['profile', 'Profile & resume']]) + '<div id="tab"></div>';
+  await { recs: candRecs, apps: candApps, profile: candProfile }[tab]();
+}
+
+async function candRecs() {
+  const r = await api('GET', '/candidates/me/recommendations');
+  $('tab').innerHTML = r.map((m) => jobCard(m.item,
+    `<div style="margin-top:6px"><span class="match">${m.score}% match</span><span class="muted">Missing skills: ${esc(m.missingSkills.join(', ') || 'none')}</span></div>${applyBtn(m.item.id)}`)).join('')
+    || note('No recommendations yet. Add skills to your profile or upload a resume.');
+}
+
+async function candApps() {
+  const r = await api('GET', '/applications/mine');
+  $('tab').innerHTML = r.map((a) => `<div class="card"><div class="row"><div><h3>${esc(a.job?.title || 'Job removed')}</h3>
+    <div class="muted">${esc(a.job?.companyName || '')} · ${esc(a.job?.location || '')} · ${a.matchScore}% match</div></div>
+    <span class="badge ${a.status}">${a.status}</span></div>
+    <p class="muted">History: ${a.history.map((h) => h.status + (h.note ? ` (${esc(h.note)})` : '')).join(' &rarr; ')}</p></div>`).join('')
+    || note('You have not applied to any job yet.');
+}
+
+async function candProfile() {
+  const p = (await api('GET', '/candidates/me')).profile;
+  $('tab').innerHTML = `<div class="card"><h3>Resume</h3><p class="muted">Upload a PDF, DOCX or TXT file. Skills, phone and experience are added to your profile automatically.
+    ${p.resumeFile ? 'A resume is already uploaded.' : ''}</p>
+    <div class="grid"><input type="file" id="resume" accept=".pdf,.docx,.txt"><button onclick="act(uploadResume)">Upload resume</button></div></div>
+    <div class="card"><h3>Profile</h3><div class="grid">
+      <input id="p-fullName" placeholder="Full name" value="${esc(p.fullName)}">
+      <input id="p-headline" placeholder="Headline" value="${esc(p.headline)}">
+      <input id="p-location" placeholder="Location" value="${esc(p.location)}">
+      <input id="p-phone" placeholder="Phone" value="${esc(p.phone)}">
+      <input id="p-skills" placeholder="Skills, comma separated" value="${esc(p.skills.join(', '))}">
+      <input id="p-experienceYears" type="number" placeholder="Years of experience" value="${p.experienceYears}">
+      <input id="p-expectedSalary" type="number" placeholder="Expected yearly salary" value="${esc(p.expectedSalary)}"></div>
+      <textarea id="p-summary" placeholder="Summary">${esc(p.summary)}</textarea>
+      <div class="actions"><button onclick="act(saveProfile)">Save profile</button></div></div>`;
+}
+
+async function saveProfile() {
+  const body = {};
+  for (const k of ['fullName', 'headline', 'location', 'phone', 'skills', 'experienceYears', 'expectedSalary', 'summary']) {
+    const v = $('p-' + k).value.trim();
+    if (!v) continue;
+    body[k] = k === 'skills' ? v.split(',') : ['experienceYears', 'expectedSalary'].includes(k) ? Number(v) : v;
+  }
+  await api('PUT', '/candidates/me', body);
+  toast('Profile saved');
+  candProfile();
+}
+
+async function uploadResume() {
+  const file = $('resume').files[0];
+  if (!file) throw new Error('Choose a file first');
+  const form = new FormData();
+  form.append('resume', file);
+  const r = await api('POST', '/candidates/me/resume', form, true);
+  toast('Resume parsed. Skills found: ' + (r.parsed.skills.join(', ') || 'none'));
+  candProfile();
+}
+
+// ---------- employer dashboard ----------
+async function empView() {
+  tab = tab || 'jobs';
+  $('app').innerHTML = tabBar([['jobs', 'My jobs'], ['post', 'Post a job'], ['search', 'Find candidates']]) + '<div id="tab"></div>';
+  await { jobs: empJobs, post: postForm, search: candSearch }[tab]();
+}
+
+async function empJobs() {
+  const r = await api('GET', '/jobs/mine');
+  $('tab').innerHTML = r.map((j) => `<div class="card"><div class="row"><div><h3>${esc(j.title)}</h3>
+    <div class="muted">${esc(j.location)} · ${money(j.salaryMin)} - ${money(j.salaryMax)} · ${j.applicationCount} applicant(s)</div></div>
+    <span class="badge ${j.status}">${j.status}</span></div>${chips(j.skills)}
+    <div class="actions"><button onclick="act(()=>applicants('${j.id}'))">Applicants</button>
+    <button class="alt" onclick="act(()=>bestCandidates('${j.id}'))">Best candidates</button>
+    <button class="alt" onclick="act(()=>setJobStatus('${j.id}','${j.status === 'open' ? 'closed' : 'open'}'))">${j.status === 'open' ? 'Close job' : 'Reopen job'}</button>
+    <button class="alt" onclick="act(()=>deleteJob('${j.id}'))">Delete</button></div></div>`).join('')
+    || note('You have not posted any jobs yet.');
+}
+
+async function setJobStatus(id, status) { await api('PUT', '/jobs/' + id, { status }); empJobs(); }
+async function deleteJob(id) { if (confirm('Delete this job?')) { await api('DELETE', '/jobs/' + id); empJobs(); } }
+
+function postForm() {
+  $('tab').innerHTML = `<div class="card"><h3>Post a job</h3><div class="grid">
+    <input id="j-title" placeholder="Job title"><input id="j-location" placeholder="Location">
+    <select id="j-jobType"><option>full-time</option><option>part-time</option><option>contract</option><option>internship</option></select>
+    <input id="j-salaryMin" type="number" placeholder="Minimum yearly salary"><input id="j-salaryMax" type="number" placeholder="Maximum yearly salary">
+    <input id="j-minExperience" type="number" placeholder="Minimum experience (years)">
+    <input id="j-skills" placeholder="Required skills, comma separated"></div>
+    <textarea id="j-description" placeholder="Job description"></textarea>
+    <p><label><input type="checkbox" id="j-remote" style="width:auto"> Remote job</label></p>
+    <button onclick="act(postJob)">Post job</button></div>`;
+}
+
+async function postJob() {
+  const v = (k) => $('j-' + k).value.trim();
+  await api('POST', '/jobs', {
+    title: v('title'), description: v('description'), location: v('location'), jobType: v('jobType'),
+    remote: $('j-remote').checked, salaryMin: Number(v('salaryMin')), salaryMax: Number(v('salaryMax')),
+    minExperience: Number(v('minExperience') || 0), skills: v('skills').split(','),
+  });
+  toast('Job posted');
+  show('employer', 'jobs');
+}
+
+async function applicants(id) {
+  const r = await api('GET', `/jobs/${id}/applications`);
+  $('tab').innerHTML = `<button class="alt" onclick="show('employer','jobs')">&larr; Back to my jobs</button><h2>Applicants</h2>` +
+    (r.map((a) => candCard(a.candidate, `
+      <div class="muted"><span class="match">${a.matchScore}% match</span><span class="badge ${a.status}">${a.status}</span></div>
+      ${a.coverLetter ? `<p>"${esc(a.coverLetter)}"</p>` : ''}
+      <div class="grid" style="margin-top:10px"><select id="s-${a.id}">${STATUSES.map((s) => `<option ${s === a.status ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      <input id="n-${a.id}" placeholder="Note to candidate (optional)">
+      <button onclick="act(()=>setStatus('${a.id}','${id}'))">Update and email</button>
+      ${a.candidate.profile.hasResume ? `<button class="alt" onclick="act(()=>downloadResume('${a.id}'))">Download resume</button>` : ''}</div>`)).join('')
+      || note('No applicants yet.'));
+}
+
+async function setStatus(appId, jobId) {
+  await api('PATCH', `/applications/${appId}/status`, { status: $('s-' + appId).value, note: $('n-' + appId).value || undefined });
+  toast('Status updated and candidate emailed');
+  applicants(jobId);
+}
+
+async function downloadResume(appId) {
+  const res = await fetch(`/api/applications/${appId}/resume`, { headers: { Authorization: 'Bearer ' + token } });
+  if (!res.ok) throw new Error('Resume not available');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(await res.blob());
+  a.download = res.headers.get('content-disposition')?.match(/filename="?([^";]+)/)?.[1] || 'resume';
+  a.click();
+}
+
+async function bestCandidates(id) {
+  const r = await api('GET', `/jobs/${id}/recommended-candidates`);
+  $('tab').innerHTML = `<button class="alt" onclick="show('employer','jobs')">&larr; Back to my jobs</button><h2>Best candidates for this job</h2>` +
+    (r.map((m) => candCard(m.item, `<span class="match">${m.score}% match</span><span class="muted">Missing skills: ${esc(m.missingSkills.join(', ') || 'none')}</span>`)).join('')
+      || note('No matching candidates yet.'));
+}
+
+function candSearch() {
+  $('tab').innerHTML = `<div class="card"><div class="grid">
+    <input id="c-q" placeholder="Keyword (headline, skills, resume)"><input id="c-skills" placeholder="Skills (all required)">
+    <input id="c-location" placeholder="Location"><input id="c-minExperience" type="number" placeholder="Minimum experience">
+    <input id="c-maxExperience" type="number" placeholder="Maximum experience"><input id="c-maxSalary" type="number" placeholder="Maximum expected salary">
+    </div><button onclick="act(()=>searchCands(1))">Search candidates</button></div><div id="cres"></div>`;
+  return searchCands(1);
+}
+
+async function searchCands(page) {
+  const p = new URLSearchParams({ page, limit: 6 });
+  for (const k of ['q', 'skills', 'location', 'minExperience', 'maxExperience', 'maxSalary']) {
+    if ($('c-' + k).value) p.set(k, $('c-' + k).value);
+  }
+  const r = await api('GET', '/candidates/search?' + p);
+  $('cres').innerHTML = (r.items.map((c) => candCard(c)).join('') || note('No candidates found.')) + pager(r, 'searchCands');
+}
+
+render();
+</script>
+</body>
+</html>
